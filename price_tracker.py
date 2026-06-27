@@ -4,6 +4,13 @@ Price Tracker - Mercado Livre & Amazon
 Le os produtos configurados em products.json, busca o preco atual
 em cada site e envia uma mensagem no Telegram com o resultado.
 
+Mercado Livre: usa a API pública oficial (sem necessidade de login)
+sempre que possível, com fallback para scraping da página.
+
+Amazon: faz scraping da página (a Amazon não tem API pública de
+preços para uso fora do programa de afiliados). Bloqueios anti-bot
+são esperados e tratados sem derrubar o script.
+
 Variaveis de ambiente necessarias:
     TELEGRAM_TOKEN   -> token do bot (via @BotFather)
     TELEGRAM_CHAT_ID -> id do chat/usuario que vai receber a mensagem
@@ -42,10 +49,57 @@ def send_telegram_message(text: str) -> None:
         print(f"Erro ao enviar mensagem no Telegram: {exc}")
 
 
+# ---------------------------------------------------------------------------
+# Mercado Livre
+# ---------------------------------------------------------------------------
+
+def extract_ml_id(url: str):
+    """Extrai o ID (ex: MLB65916422) de uma URL de produto ou item do ML."""
+    match = re.search(r"(MLB-?\d+)", url, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).replace("-", "").upper()
+
+
+def get_price_mercadolivre_api(item_id: str):
+    """Usa a API pública do Mercado Livre (sem necessidade de login).
+    Tenta primeiro como produto de catálogo, depois como item individual."""
+
+    # Página de catálogo (URLs no formato .../p/MLBxxxxxxx)
+    try:
+        resp = requests.get(
+            f"https://api.mercadolibre.com/products/{item_id}",
+            headers=HEADERS, timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            winner = data.get("buy_box_winner") or {}
+            price = winner.get("price")
+            if price is not None:
+                return data.get("name"), float(price)
+    except Exception as exc:
+        print(f"[debug] erro na API de produto ML ({item_id}): {exc}")
+
+    # Item individual (URLs no formato .../MLB-xxxxxxxxx-...)
+    try:
+        resp = requests.get(
+            f"https://api.mercadolibre.com/items/{item_id}",
+            headers=HEADERS, timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            price = data.get("price")
+            if price is not None:
+                return data.get("title"), float(price)
+    except Exception as exc:
+        print(f"[debug] erro na API de item ML ({item_id}): {exc}")
+
+    return None, None
+
+
 def extract_from_ldjson(soup: BeautifulSoup):
     """Tenta extrair nome e preço dos dados estruturados (schema.org)
-    que a maioria dos e-commerces inclui para SEO. É mais estável do
-    que depender de classes CSS, que mudam com frequência."""
+    que a maioria dos e-commerces inclui para SEO."""
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
@@ -76,6 +130,14 @@ def extract_from_ldjson(soup: BeautifulSoup):
 
 
 def get_price_mercadolivre(url: str):
+    # 1) Caminho preferido: API pública (não depende de scraping nem login)
+    item_id = extract_ml_id(url)
+    if item_id:
+        name, price = get_price_mercadolivre_api(item_id)
+        if price is not None:
+            return name or "Produto Mercado Livre", price
+
+    # 2) Fallback: scraping da página (ld+json, depois classes CSS)
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -86,7 +148,6 @@ def get_price_mercadolivre(url: str):
         title = name or (title_tag.get_text(strip=True) if title_tag else "Produto Mercado Livre")
         return title, price
 
-    # Fallback: classes CSS da página (podem mudar sem aviso)
     title_tag = soup.find("h1", class_="ui-pdp-title")
     title = title_tag.get_text(strip=True) if title_tag else "Produto Mercado Livre"
 
@@ -100,6 +161,10 @@ def get_price_mercadolivre(url: str):
     return title, price
 
 
+# ---------------------------------------------------------------------------
+# Amazon
+# ---------------------------------------------------------------------------
+
 def get_price_amazon(url: str):
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
@@ -111,7 +176,6 @@ def get_price_amazon(url: str):
         title = name or (title_tag.get_text(strip=True) if title_tag else "Produto Amazon")
         return title, price
 
-    # Fallback: classes CSS da página (podem mudar sem aviso)
     title_tag = soup.find(id="productTitle")
     title = title_tag.get_text(strip=True) if title_tag else "Produto Amazon"
 
@@ -132,6 +196,10 @@ def get_price_amazon(url: str):
         price = None
     return title, price
 
+
+# ---------------------------------------------------------------------------
+# Orquestração
+# ---------------------------------------------------------------------------
 
 def check_product(product: dict) -> None:
     site = product["site"].lower()
