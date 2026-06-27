@@ -42,16 +42,57 @@ def send_telegram_message(text: str) -> None:
         print(f"Erro ao enviar mensagem no Telegram: {exc}")
 
 
+def extract_from_ldjson(soup: BeautifulSoup):
+    """Tenta extrair nome e preço dos dados estruturados (schema.org)
+    que a maioria dos e-commerces inclui para SEO. É mais estável do
+    que depender de classes CSS, que mudam com frequência."""
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string)
+        except (TypeError, ValueError):
+            continue
+
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("@type") not in ("Product", ["Product"]):
+                continue
+
+            name = item.get("name")
+            offers = item.get("offers")
+            if isinstance(offers, list):
+                offers = offers[0] if offers else None
+            price = None
+            if isinstance(offers, dict):
+                price = offers.get("price") or offers.get("lowPrice")
+
+            if price is not None:
+                try:
+                    return name, float(price)
+                except (TypeError, ValueError):
+                    pass
+    return None, None
+
+
 def get_price_mercadolivre(url: str):
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    name, price = extract_from_ldjson(soup)
+    if price is not None:
+        title_tag = soup.find("h1", class_="ui-pdp-title")
+        title = name or (title_tag.get_text(strip=True) if title_tag else "Produto Mercado Livre")
+        return title, price
+
+    # Fallback: classes CSS da página (podem mudar sem aviso)
     title_tag = soup.find("h1", class_="ui-pdp-title")
     title = title_tag.get_text(strip=True) if title_tag else "Produto Mercado Livre"
 
     price_tag = soup.find("span", class_="andes-money-amount__fraction")
     if not price_tag:
+        print(f"[debug] status={resp.status_code} tamanho_html={len(resp.text)} url={url}")
         return title, None
 
     price_text = price_tag.get_text(strip=True)
@@ -64,6 +105,13 @@ def get_price_amazon(url: str):
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    name, price = extract_from_ldjson(soup)
+    if price is not None:
+        title_tag = soup.find(id="productTitle")
+        title = name or (title_tag.get_text(strip=True) if title_tag else "Produto Amazon")
+        return title, price
+
+    # Fallback: classes CSS da página (podem mudar sem aviso)
     title_tag = soup.find(id="productTitle")
     title = title_tag.get_text(strip=True) if title_tag else "Produto Amazon"
 
@@ -73,6 +121,7 @@ def get_price_amazon(url: str):
         or soup.find(id="priceblock_dealprice")
     )
     if not price_tag:
+        print(f"[debug] status={resp.status_code} tamanho_html={len(resp.text)} url={url}")
         return title, None
 
     raw = price_tag.get_text(strip=True)
