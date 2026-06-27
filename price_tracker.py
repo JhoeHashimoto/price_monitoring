@@ -71,6 +71,7 @@ def get_price_mercadolivre_api(item_id: str):
             f"https://api.mercadolibre.com/products/{item_id}",
             headers=HEADERS, timeout=15,
         )
+        print(f"[debug] API /products/{item_id} -> status={resp.status_code} body={resp.text[:200]!r}")
         if resp.status_code == 200:
             data = resp.json()
             winner = data.get("buy_box_winner") or {}
@@ -86,6 +87,7 @@ def get_price_mercadolivre_api(item_id: str):
             f"https://api.mercadolibre.com/items/{item_id}",
             headers=HEADERS, timeout=15,
         )
+        print(f"[debug] API /items/{item_id} -> status={resp.status_code} body={resp.text[:200]!r}")
         if resp.status_code == 200:
             data = resp.json()
             price = data.get("price")
@@ -154,6 +156,7 @@ def get_price_mercadolivre(url: str):
     price_tag = soup.find("span", class_="andes-money-amount__fraction")
     if not price_tag:
         print(f"[debug] status={resp.status_code} tamanho_html={len(resp.text)} url={url}")
+        print(f"[debug] snippet={resp.text[:400]!r}")
         return title, None
 
     price_text = price_tag.get_text(strip=True)
@@ -186,6 +189,7 @@ def get_price_amazon(url: str):
     )
     if not price_tag:
         print(f"[debug] status={resp.status_code} tamanho_html={len(resp.text)} url={url}")
+        print(f"[debug] snippet={resp.text[:400]!r}")
         return title, None
 
     raw = price_tag.get_text(strip=True)
