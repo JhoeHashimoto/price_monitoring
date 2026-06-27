@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Exemplo - Echo Dot",
+    "site": "amazon",
+    "url": "https://www.amazon.com.br/dp/SUBSTITUA_PELO_ASIN",
+    "preco_alvo": 250.00
+  },
+  {
+    "name": "Exemplo - Notebook",
+    "site": "mercadolivre",
+    "url": "https://www.mercadolivre.com.br/SUBSTITUA-PELO-LINK-DO-PRODUTO",
+    "preco_alvo": null
+  }
+]
