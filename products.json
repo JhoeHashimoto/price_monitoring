@@ -1,14 +1,14 @@
 [
   {
-    "name": "Exemplo - Echo Dot",
+    "name": "TV LG (Amazon)",
     "site": "amazon",
-    "url": "https://www.amazon.com.br/dp/SUBSTITUA_PELO_ASIN",
-    "preco_alvo": 250.00
+    "url": "https://www.amazon.com.br/dp/B0GL9JXK9N",
+    "preco_alvo": null
   },
   {
-    "name": "Exemplo - Notebook",
+    "name": "TV LG (Mercado Livre)",
     "site": "mercadolivre",
-    "url": "https://www.mercadolivre.com.br/SUBSTITUA-PELO-LINK-DO-PRODUTO",
+    "url": "https://www.mercadolivre.com.br/p/MLB65916422",
     "preco_alvo": null
   }
 ]
