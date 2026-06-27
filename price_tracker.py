@@ -4,12 +4,12 @@ Price Tracker - Mercado Livre & Amazon
 Le os produtos configurados em products.json, busca o preco atual
 em cada site e envia uma mensagem no Telegram com o resultado.
 
-Mercado Livre: usa a API pública oficial (sem necessidade de login)
-sempre que possível, com fallback para scraping da página.
-
-Amazon: faz scraping da página (a Amazon não tem API pública de
-preços para uso fora do programa de afiliados). Bloqueios anti-bot
-são esperados e tratados sem derrubar o script.
+IMPORTANTE: Amazon e Mercado Livre podem bloquear requisições vindas
+de servidores em nuvem (como os do GitHub Actions), tratando-as como
+"tráfego suspeito". Isso é esperado e tratado sem derrubar o script —
+quando acontece, ele simplesmente loga o aviso e segue para o próximo
+produto. Em dias de bloqueio, nenhuma mensagem chega no Telegram para
+aquele produto; no próximo agendamento, tenta de novo.
 
 Variaveis de ambiente necessarias:
     TELEGRAM_TOKEN   -> token do bot (via @BotFather)
@@ -32,8 +32,26 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
 }
+
+# Marcadores que indicam que a resposta é uma página de bloqueio
+# anti-bot, e não o conteúdo real do produto.
+BLOCK_MARKERS = [
+    "suspicious-traffic",
+    "robot check",
+    "are you a human",
+    "/errors/validateCaptcha",
+    "to discuss automated access",
+]
 
 
 def send_telegram_message(text: str) -> None:
@@ -49,59 +67,40 @@ def send_telegram_message(text: str) -> None:
         print(f"Erro ao enviar mensagem no Telegram: {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Mercado Livre
-# ---------------------------------------------------------------------------
-
-def extract_ml_id(url: str):
-    """Extrai o ID (ex: MLB65916422) de uma URL de produto ou item do ML."""
-    match = re.search(r"(MLB-?\d+)", url, re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).replace("-", "").upper()
+def looks_blocked(html_text: str) -> bool:
+    lowered = html_text.lower()
+    return any(marker.lower() in lowered for marker in BLOCK_MARKERS) or len(html_text) < 20000
 
 
-def get_price_mercadolivre_api(item_id: str):
-    """Usa a API pública do Mercado Livre (sem necessidade de login).
-    Tenta primeiro como produto de catálogo, depois como item individual."""
+def fetch_with_retry(session: requests.Session, url: str, attempts: int = 2, wait_seconds: int = 4):
+    """Busca a URL com 1 tentativa extra em caso de bloqueio/erro,
+    já que esses bloqueios costumam ser intermitentes."""
+    last_resp = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"[aviso] tentativa {attempt}/{attempts} falhou para {url}: {exc}")
+            last_resp = None
+            time.sleep(wait_seconds)
+            continue
 
-    # Página de catálogo (URLs no formato .../p/MLBxxxxxxx)
-    try:
-        resp = requests.get(
-            f"https://api.mercadolibre.com/products/{item_id}",
-            headers=HEADERS, timeout=15,
-        )
-        print(f"[debug] API /products/{item_id} -> status={resp.status_code} body={resp.text[:200]!r}")
-        if resp.status_code == 200:
-            data = resp.json()
-            winner = data.get("buy_box_winner") or {}
-            price = winner.get("price")
-            if price is not None:
-                return data.get("name"), float(price)
-    except Exception as exc:
-        print(f"[debug] erro na API de produto ML ({item_id}): {exc}")
+        last_resp = resp
+        if not looks_blocked(resp.text):
+            return resp
 
-    # Item individual (URLs no formato .../MLB-xxxxxxxxx-...)
-    try:
-        resp = requests.get(
-            f"https://api.mercadolibre.com/items/{item_id}",
-            headers=HEADERS, timeout=15,
-        )
-        print(f"[debug] API /items/{item_id} -> status={resp.status_code} body={resp.text[:200]!r}")
-        if resp.status_code == 200:
-            data = resp.json()
-            price = data.get("price")
-            if price is not None:
-                return data.get("title"), float(price)
-    except Exception as exc:
-        print(f"[debug] erro na API de item ML ({item_id}): {exc}")
+        print(f"[aviso] tentativa {attempt}/{attempts}: resposta parece bloqueio anti-bot ({url})")
+        if attempt < attempts:
+            time.sleep(wait_seconds)
 
-    return None, None
+    return last_resp
 
 
 def extract_from_ldjson(soup: BeautifulSoup):
     """Tenta extrair nome e preço dos dados estruturados (schema.org)
-    que a maioria dos e-commerces inclui para SEO."""
+    que a maioria dos e-commerces inclui para SEO. Mais estável do
+    que depender de classes CSS, que mudam com frequência."""
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
@@ -131,18 +130,16 @@ def extract_from_ldjson(soup: BeautifulSoup):
     return None, None
 
 
-def get_price_mercadolivre(url: str):
-    # 1) Caminho preferido: API pública (não depende de scraping nem login)
-    item_id = extract_ml_id(url)
-    if item_id:
-        name, price = get_price_mercadolivre_api(item_id)
-        if price is not None:
-            return name or "Produto Mercado Livre", price
+def get_price_mercadolivre(url: str, session: requests.Session):
+    resp = fetch_with_retry(session, url)
+    if resp is None:
+        return "Produto Mercado Livre", None
 
-    # 2) Fallback: scraping da página (ld+json, depois classes CSS)
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
+
+    if looks_blocked(resp.text):
+        print(f"[aviso] Mercado Livre devolveu página de bloqueio/tráfego suspeito para {url}")
+        return "Produto Mercado Livre", None
 
     name, price = extract_from_ldjson(soup)
     if price is not None:
@@ -155,8 +152,6 @@ def get_price_mercadolivre(url: str):
 
     price_tag = soup.find("span", class_="andes-money-amount__fraction")
     if not price_tag:
-        print(f"[debug] status={resp.status_code} tamanho_html={len(resp.text)} url={url}")
-        print(f"[debug] snippet={resp.text[:400]!r}")
         return title, None
 
     price_text = price_tag.get_text(strip=True)
@@ -164,14 +159,16 @@ def get_price_mercadolivre(url: str):
     return title, price
 
 
-# ---------------------------------------------------------------------------
-# Amazon
-# ---------------------------------------------------------------------------
+def get_price_amazon(url: str, session: requests.Session):
+    resp = fetch_with_retry(session, url)
+    if resp is None:
+        return "Produto Amazon", None
 
-def get_price_amazon(url: str):
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
+
+    if looks_blocked(resp.text):
+        print(f"[aviso] Amazon devolveu página de bloqueio/verificação anti-bot para {url}")
+        return "Produto Amazon", None
 
     name, price = extract_from_ldjson(soup)
     if price is not None:
@@ -188,8 +185,6 @@ def get_price_amazon(url: str):
         or soup.find(id="priceblock_dealprice")
     )
     if not price_tag:
-        print(f"[debug] status={resp.status_code} tamanho_html={len(resp.text)} url={url}")
-        print(f"[debug] snippet={resp.text[:400]!r}")
         return title, None
 
     raw = price_tag.get_text(strip=True)
@@ -201,20 +196,16 @@ def get_price_amazon(url: str):
     return title, price
 
 
-# ---------------------------------------------------------------------------
-# Orquestração
-# ---------------------------------------------------------------------------
-
-def check_product(product: dict) -> None:
+def check_product(product: dict, session: requests.Session) -> None:
     site = product["site"].lower()
     url = product["url"]
     name = product.get("name", "")
 
     try:
         if site == "mercadolivre":
-            title, price = get_price_mercadolivre(url)
+            title, price = get_price_mercadolivre(url, session)
         elif site == "amazon":
-            title, price = get_price_amazon(url)
+            title, price = get_price_amazon(url, session)
         else:
             print(f"Site desconhecido: {site}")
             return
@@ -244,8 +235,10 @@ def main() -> None:
     with open("products.json", "r", encoding="utf-8") as f:
         products = json.load(f)
 
+    session = requests.Session()
+
     for product in products:
-        check_product(product)
+        check_product(product, session)
         time.sleep(3)  # evita martelar os sites com requisições muito rápidas
 
 
